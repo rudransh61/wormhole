@@ -4,7 +4,6 @@ pragma solidity ^0.8.19;
 
 import {IWormhole} from "../../interfaces/IWormhole.sol";
 import {
-  RETURNDATA_TRUNCATION_THRESHOLD,
   InvalidDeliveryVaa,
   InvalidEmitter,
   InsufficientRelayerFunds,
@@ -28,7 +27,7 @@ import {
 import {DeliveryData, IWormholeReceiver} from "../../interfaces/relayer/IWormholeReceiver.sol";
 import {IRelayProvider} from "../../interfaces/relayer/IRelayProvider.sol";
 
-import {pay, min, toWormholeFormat, fromWormholeFormat} from "./Utils.sol";
+import {pay, min, toWormholeFormat, fromWormholeFormat, returnLengthBoundedCall} from "./Utils.sol";
 import {BytesParsing} from "./BytesParsing.sol";
 import {CoreRelayerSerde} from "./CoreRelayerSerde.sol";
 import {ForwardInstruction} from "./CoreRelayerStorage.sol";
@@ -253,24 +252,24 @@ abstract contract CoreRelayerDelivery is CoreRelayerBase, IWormholeRelayerDelive
     // (with the gas limit and value specified in instruction, and 'encodedVMs' as the input)
     IWormholeReceiver deliveryTarget =
       IWormholeReceiver(fromWormholeFormat(instruction.targetAddress));
-    try deliveryTarget.receiveWormholeMessages{
-          gas:   instruction.executionParameters.gasLimit,
-          value: instruction.receiverValueTarget
-        } (data, signedVaas) {
+
+    bytes memory callData = abi.encodeCall(deliveryTarget.receiveWormholeMessages, (data, signedVaas));
+    (bool success, bytes memory returnedData) = returnLengthBoundedCall(
+      payable(address(deliveryTarget)),
+      callData,
+      instruction.executionParameters.gasLimit,
+      instruction.receiverValueTarget
+    );
+    if (success) {
       targetRevertDataTruncated = new bytes(0);
       status = uint8(DeliveryStatus.SUCCESS);
-    }
-    catch (bytes memory revertData) {
-      if (revertData.length > RETURNDATA_TRUNCATION_THRESHOLD)
-        (targetRevertDataTruncated,) =
-          revertData.sliceUnchecked(0, RETURNDATA_TRUNCATION_THRESHOLD);
-      else
-        targetRevertDataTruncated = revertData;
+    } else {
+      targetRevertDataTruncated = returnedData;
       status = uint8(DeliveryStatus.RECEIVER_FAILURE);
     }
 
     uint256 postGas = gasleft();
-    
+
     unchecked{gasUsed = uint32(min(preGas - postGas, instruction.executionParameters.gasLimit));}
 
     ForwardInstruction[] storage forwardInstructions = getForwardInstructions();
